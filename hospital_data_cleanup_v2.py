@@ -326,18 +326,22 @@ class DataValidator:
     
     @staticmethod
     def format_phone(phone: str) -> Tuple[str, bool, str]:
-        """Format phone number to (XXX) XXX-XXXX"""
+        """Return digits-only 10-digit phone (strip non-digits, drop leading 1)"""
         if not phone or pd.isna(phone):
             return '', False, 'Empty phone number'
         
         digits = re.sub(r'\D', '', str(phone))
         
+        # Drop leading country code 1 for US numbers
+        if len(digits) == 11 and digits[0] == '1':
+            digits = digits[1:]
+        
         if len(digits) == 10:
-            return f"({digits[:3]}) {digits[3:6]}-{digits[6:10]}", True, ''
-        elif len(digits) == 11 and digits[0] == '1':
-            return f"({digits[1:4]}) {digits[4:7]}-{digits[7:11]}", True, ''
+            return digits, True, ''
+        elif len(digits) == 0:
+            return '', False, 'No digits in phone'
         else:
-            return phone, False, f'Invalid format ({len(digits)} digits)'
+            return digits, False, f'Invalid format ({len(digits)} digits)'
 
 
 class GeocodingService:

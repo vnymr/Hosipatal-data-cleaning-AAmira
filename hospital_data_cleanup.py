@@ -202,7 +202,7 @@ class HospitalDataCleaner:
         return zip_code, False, f'Invalid ZIP format: {zip_code}'
     
     def format_phone(self, phone):
-        """Format phone number to consistent format (XXX) XXX-XXXX"""
+        """Return digits-only 10-digit phone (strip non-digits, drop leading 1)"""
         if pd.isna(phone) or phone == '':
             return '', False, 'Empty phone number'
         
@@ -210,21 +210,16 @@ class HospitalDataCleaner:
         # Extract digits only
         digits = re.sub(r'\D', '', str(phone))
         
+        # Drop leading country code 1 for US numbers
+        if len(digits) == 11 and digits[0] == '1':
+            digits = digits[1:]
+        
         if len(digits) == 10:
-            # Format as (XXX) XXX-XXXX
-            formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:10]}"
-            return formatted, True, ''
-        elif len(digits) == 11:
-            if digits[0] == '1':
-                # US number with country code
-                formatted = f"({digits[1:4]}) {digits[4:7]}-{digits[7:11]}"
-                return formatted, True, ''
-            else:
-                return phone, False, f'Invalid phone format: {phone} ({len(digits)} digits)'
+            return digits, True, ''
         elif len(digits) == 0:
             return '', False, 'No phone number'
         else:
-            return phone, False, f'Invalid phone format: {phone} ({len(digits)} digits)'
+            return digits, False, f'Invalid phone format: {phone} ({len(digits)} digits)'
     
     def expand_abbreviations(self, text):
         """Expand common medical and geographic abbreviations"""

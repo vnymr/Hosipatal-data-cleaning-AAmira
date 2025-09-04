@@ -1,0 +1,28 @@
+{
+  "total_records": 1436,
+  "timestamp": "2025-09-04 10:58:26",
+  "validation_summary": {
+    "valid_states": 1402,
+    "invalid_states": 34,
+    "valid_zips": 1392,
+    "invalid_zips": 44,
+    "valid_phones": 1397,
+    "invalid_phones": 39,
+    "valid_fax": 1008,
+    "invalid_fax": 428
+  },
+  "unique_validation_errors": [
+    "Invalid state: Rd",
+    "Invalid state: 1",
+    "Invalid state: nan",
+    "Invalid state: xx",
+    "Invalid state: F",
+    "Invalid state: 34"
+  ],
+  "validation_percentages": {
+    "states": 97.63,
+    "zips": 96.94,
+    "phones": 97.28,
+    "fax": 70.19
+  }
+}
