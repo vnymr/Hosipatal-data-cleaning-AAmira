@@ -1,0 +1,129 @@
+As part of the hospital data standardization effort, I need to create a cleanup 
+process to normalize existing hospital records before moving to downstream matching and consolidation.
+Develop a cleanup approach that takes the existing hospital dataset and output a structured, 
+normalized version.
+
+
+##User story
+As a data analyst, I want to have Hospital data scrubbed, so that when I go to identify duplicate records, 
+I will have greater confidence in the quality of my data. We need to create a data cleanup process that will 
+"clean up" data that is currently "messy".
+
+
+##Acceptance criteria
+Data is analyzed for elements that can be standardized
+
+Data cleanup:
+    Hospital Name = camel case (example: memorialHospital)
+    Address = camel case
+    Direction abbreviations standardized (example: N. = North)
+    Street, road, avenue standardized
+
+    Trim excess spaces
+    Address 2 camel case
+    City = camel case
+    Validate the State abbreviation and log invalid values
+    State abbreviations = Upper Case
+    Zip code = 5 digits only
+    Phone = consistent format
+    Facimile = consistent format
+
+Note: Consider the exceptions (example: “North Hill Road” is a name that should not be abbreviated as N. Hill Road)
+Clean up script is created based on above data cleanup criteria.
+
+References Manager Asked me to use:
+
+
+Google API
+      <!--- ***** Google Maps Configuration ***** --->
+            <!--- ********** ---><cfset application.mapkey = 'ABQIAAAAy3ARw0p3ZTv2Tk6wenx68xRi_j0U6kJrkFvY4-OX2XYmEAa76BRomM3a8tXyvW5-mk7iNvWLUxrlWQ'>
+            <!--- ********** ---><cfset application.mapkeyV3 = 'AIzaSyDP9auV9962OmYCMAoK6CrinRav0WoHqtA'>
+            <!--- This key is used for Physicians Access (PA) only.  Something happened when we switched Google accounts and the maps api calls weren't working anymore so this one was added --->
+            <!--- ********** ---><cfset application.mapkeyPA = 'AIzaSyDE8VI75azN1eyC8kvkqsIsUt6jtBlWvww'>
+            <!--- ********** ---><cfset application.googleAPIKey = 'ABQIAAAA0FHtc3VK8FUxRrYApBi4-xQCbsnsAsYXv51Hc-zaJqS-QsapjxQ5D8SgsUcoOHWlpD2qBqSDQexZoQ' />
+            <!--- ********** ---><cfset application.googleCryptoKey = 'd4AHLHSKBvOzPMEJdet4s5NeCFE='>
+            <!--- ********** ---><cfset application.googleClientID = 'gme-kinnsersoftwareinc' />
+            <!--- ********** ---><cfset application.googleMapsJavascriptAPIVersion = '3'>
+            <!--- ********** ---><cfset application.googleMapsJavascriptAPIBaseURL = 'https://maps.googleapis.com/maps/api/js' />
+            <!--- ********** ---><cfset application.googleMapsGeocodeAPIBaseURL = 'https://maps.googleapis.com/maps/api/geocode/json' />
+            <!--- ********** ---><cfset application.googleMapsJavascriptAPIURL = '#application.googleMapsJavascriptAPIBaseURL#?client=#application.googleClientID#&sensor=true&v=#application.googleMapsJavascriptAPIVersion#' />
+            <!--- ********** ---><cfset application.googleMapsJavascriptAPIFreeURL = '#application.googleMapsJavascriptAPIBaseURL#?key=#application.mapkeyV3#&sensor=false' />
+            <!--- ********** ---><cfset application.googleMapsApprovedCompanyHosts = "localhost,kinnser.com,kinnser.net,kinnseram.net" />
+
+
+EXAMPLE:
+
+<cfcomponent extends="API.services.WebService">
+   
+    <cffunction name="getGeocodingAddress" access="remote" returntype="struct" returnformat="json" output="false">
+        <cfargument name="street" type="string" required="true">
+            <cfargument name="city" type="string" required="true">
+            <cfargument name="state" type="string" required="true">
+            <cfargument name="postalcode" type="string" required="true">
+
+        <cfset this.init() />
+       
+          <cfset local.result = getResultObject() />
+
+        <!--- strip address of pound sign(#) before validation --->
+            <cfset var cleansedStreet = rereplaceNoCase("#arguments.street#","##"," ", "ALL")>
+
+        <cftry>
+            <cfset local.data = {} />
+            <cfset local.location = {} />
+
+            <cfset local.address = URLEncodedFormat("#cleansedStreet# #arguments.city# #arguments.postalcode# #arguments.state#")>
+            <cfset local.baseURL = "#application.googleMapsGeocodeAPIBaseURL#?address=#local.address#&key=#application.mapkeyPA#">
+
+            <cfhttp method="GET" url="#local.baseURL#"  result="local.response" timeout="10" throwonerror="true"  />
+
+                  <cfif local.response.Responseheader.status_code NEQ 200 OR isJSON(local.response.Filecontent) is "NO">
+                <cfset local.result.setSuccess(false) />
+                <cfset structInsert( local.data, 'valid', false ) >
+                <cfset structInsert( local.data, 'unavailable', true) >
+            <cfelse>
+                <cfset local.resp =  deserializeJSON(local.response.Filecontent) />
+                <cfif local.resp.status EQ 'OK'>
+                    <cfset structInsert( local.location, 'lat', local.resp.results[1].geometry.location.lat) >
+                    <cfset structInsert( local.location, 'lng', local.resp.results[1].geometry.location.lng) >
+                    <cfset structInsert( local.data, 'location', local.location) >
+                    <cfset structInsert( local.data, 'quality', getAccuracyForLocationType(local.resp.results[1].geometry.location_type)) >
+                    <cfset structInsert( local.data, 'valid', true) >
+                    <cfset structInsert( local.data, 'unavailable', false) >
+                <cfelse>
+                    <cfset structInsert( local.data, 'valid', false) >
+                    <cfset structInsert( local.data, 'unavailable', false) >
+                </cfif>
+            </cfif>
+
+            <cfset structInsert( local.data, 'date', dateFormat( now(), 'YYYY-MM-DD HH:mm:ss') ) >
+                  <cfset local.result.setData( local.data ) />
+
+            <cfcatch type="any">
+                <cfset local.result.buildSystemError(cfcatch) />
+                <cfset variables.Error.tryLogError(cfcatch) />
+                <cflog file="GeocodingServiceError" type="Error" text="#cfcatch.message# - #cfcatch.detail#"/>
+            </cfcatch>
+        </cftry>
+
+        <cfreturn local.result />
+
+    </cffunction>
+
+<cffunction name="getAccuracyForLocationType" access="private" output="false" returnType="numeric"
+                  hint="Translates a location type to accuracy">
+      <cfargument name="locationType" type="string" required="true">
+
+      <cfset local.unknownAccuracy = 0 />
+      <cfset local.accuracy = {
+            "ROOFTOP"                     = 9,
+            "RANGE_INTERPOLATED"    = 6,
+            "GEOMETRIC_CENTER"            = 3,
+            "APPROXIMATE"                 = 1
+            } >
+
+      <cfreturn structKeyExists(local.accuracy, arguments.locationType) ? local.accuracy[arguments.locationType] : local.unknownAccuracy >
+
+</cffunction>
+
+</cfcomponent>

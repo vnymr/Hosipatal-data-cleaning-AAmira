@@ -1,0 +1,12 @@
+# Hospital Data Cleanup System - Required Dependencies
+# Python 3.8 or higher required
+
+# Core data processing
+pandas==2.3.2
+openpyxl==3.1.5  # Excel file handling
+
+# HTTP requests for geocoding API
+requests==2.32.5
+
+# Optional: For enhanced performance
+numpy==2.3.2  # Already included with pandas

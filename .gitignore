@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env/
+.python-version
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+Thumbs.db
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+
+# Editors
+.vscode/
+.idea/
+.history/
+
+# Data files
+*.csv
+*.xlsx
+*.xls
+*.tsv
+*.parquet
+*.feather
+*.h5
+*.db
+
+# Shell history
+.zsh_history
+.bash_history
