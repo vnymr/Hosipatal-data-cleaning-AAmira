@@ -32,6 +32,7 @@ import requests
 # File paths
 INPUT_FILE = 'Concierge Hospitals.xlsx'
 OUTPUT_FILE = 'Cleaned_Hospital_Data.xlsx'
+OUTPUT_FILE_WITH_GEO = 'Cleaned_Hospital_Data_with_Geocoding.xlsx'
 REPORT_FILE = 'Cleanup_Report.json'
 VALIDATION_LOG = 'Validation_Issues.csv'
 
@@ -92,7 +93,16 @@ class AddressStandardizer:
             'Cir.': 'Circle', 'Cir': 'Circle',
             'Pl.': 'Place', 'Pl': 'Place',
             'Pkwy.': 'Parkway', 'Pkwy': 'Parkway',
-            'Hwy.': 'Highway', 'Hwy': 'Highway'
+            'Hwy.': 'Highway', 'Hwy': 'Highway', 'HWY': 'Highway',
+            'Trl.': 'Trail', 'Trl': 'Trail',
+            'Way.': 'Way', 'Wy': 'Way', 'Wy.': 'Way',
+            'Sq.': 'Square', 'Sq': 'Square',
+            'Ter.': 'Terrace', 'Ter': 'Terrace',
+            'Pt.': 'Point', 'Pt': 'Point',
+            'Plaza.': 'Plaza', 'Plz': 'Plaza', 'Plz.': 'Plaza',
+            'Expy.': 'Expressway', 'Expy': 'Expressway',
+            'Fwy.': 'Freeway', 'Fwy': 'Freeway',
+            'Tpke.': 'Turnpike', 'Tpke': 'Turnpike'
         }
         
         self.direction_exceptions = [
@@ -195,15 +205,40 @@ class NameStandardizer:
         # Group similar names
         name_groups = self._group_similar_names(df_copy)
         
-        # Apply standardized names
+        # Apply standardized names with Title Case
         for standard_name, indices in name_groups.items():
+            # Convert to Title Case for final output
+            formatted_name = self._format_hospital_name(standard_name)
             for idx in indices:
-                df_copy.loc[idx, 'HospitalName'] = standard_name
+                df_copy.loc[idx, 'HospitalName'] = formatted_name
         
         logger.info(f"Standardized {len(name_groups)} unique names from {len(df_copy)} records")
         self._log_examples(df, name_groups)
         
         return df_copy
+    
+    def _format_hospital_name(self, name: str) -> str:
+        """Format hospital name to proper Title Case"""
+        if not name or pd.isna(name) or str(name).upper() == 'NULL':
+            return ''
+        
+        # Clean and trim excess spaces
+        name = re.sub(r'\s+', ' ', str(name)).strip()
+        
+        # Convert to title case with special handling for certain words
+        words = name.split()
+        result = []
+        
+        for i, word in enumerate(words):
+            if word:
+                # Keep certain words lowercase unless at the start
+                if word.lower() in ['of', 'the', 'and', 'for', 'at'] and i > 0:
+                    result.append(word.lower())
+                else:
+                    # Capitalize first letter, keep rest as-is for abbreviations
+                    result.append(word[0].upper() + word[1:] if len(word) > 1 else word.upper())
+        
+        return ' '.join(result)
     
     def _group_similar_names(self, df: pd.DataFrame) -> Dict[str, List[int]]:
         """Group similar hospital names together"""
@@ -326,22 +361,65 @@ class DataValidator:
     
     @staticmethod
     def format_phone(phone: str) -> Tuple[str, bool, str]:
-        """Return digits-only 10-digit phone (strip non-digits, drop leading 1)"""
-        if not phone or pd.isna(phone):
+        """Format phone to (XXX) XXX-XXXX or empty for invalid/placeholder numbers"""
+        if not phone or pd.isna(phone) or str(phone).upper() == 'NULL':
             return '', False, 'Empty phone number'
         
-        digits = re.sub(r'\D', '', str(phone))
+        phone_str = str(phone).strip()
+        digits = re.sub(r'\D', '', phone_str)
+        
+        # Check for placeholder patterns
+        if DataValidator._is_placeholder_phone(phone_str, digits):
+            return '', False, 'Placeholder number'
         
         # Drop leading country code 1 for US numbers
         if len(digits) == 11 and digits[0] == '1':
             digits = digits[1:]
         
         if len(digits) == 10:
-            return digits, True, ''
+            # Format as (XXX) XXX-XXXX
+            formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+            return formatted, True, ''
         elif len(digits) == 0:
             return '', False, 'No digits in phone'
         else:
-            return digits, False, f'Invalid format ({len(digits)} digits)'
+            return '', False, f'Invalid format ({len(digits)} digits)'
+    
+    @staticmethod
+    def _is_placeholder_phone(phone_str: str, digits: str) -> bool:
+        """Check if phone number is a placeholder"""
+        # Check for common placeholder patterns
+        if not digits:
+            return False
+            
+        # Single digit repeated (e.g., 1111111111, 2222222222)
+        if len(set(digits)) == 1:
+            return True
+        
+        # Very short numbers (less than 5 digits)
+        if len(digits) < 5:
+            return True
+        
+        # Patterns like 0000000000, 1234567890
+        placeholder_patterns = [
+            '0000000000', '1111111111', '2222222222', '3333333333',
+            '4444444444', '5555555555', '6666666666', '7777777777',
+            '8888888888', '9999999999', '1234567890', '0123456789'
+        ]
+        
+        if digits in placeholder_patterns:
+            return True
+        
+        # Check for 'xxxxx' patterns in original string
+        lower_str = phone_str.lower()
+        if 'xxxx' in lower_str or 'placeholder' in lower_str:
+            return True
+        
+        # Single digits like '0' or '1'
+        if digits in ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']:
+            return True
+            
+        return False
 
 
 class GeocodingService:
@@ -506,18 +584,22 @@ class HospitalDataCleaner:
         """Process a single record"""
         notes = []
         
-        # Clean hospital name
-        df.loc[idx, 'CleanedHospitalName'] = self._to_camel_case(row.get('HospitalName', ''))
+        # Preserve ClinicKey and HospitalKey
+        df.loc[idx, 'ClinicKey'] = row.get('ClinicKey', '')
+        df.loc[idx, 'HospitalKey'] = row.get('HospitalKey', '')
         
-        # Clean addresses
+        # Clean hospital name (Title Case)
+        df.loc[idx, 'CleanedHospitalName'] = self._to_title_case(row.get('HospitalName', ''))
+        
+        # Clean addresses (Title Case)
         addr1 = self.address_standardizer.standardize(row.get('AddressOne', ''))
-        df.loc[idx, 'CleanedAddressOne'] = self._to_camel_case(addr1)
+        df.loc[idx, 'CleanedAddressOne'] = self._to_title_case(addr1)
         
         addr2 = self._clean_address_with_pound(row.get('AddressTwo', ''))
-        df.loc[idx, 'CleanedAddressTwo'] = self._to_camel_case(addr2)
+        df.loc[idx, 'CleanedAddressTwo'] = self._to_title_case(addr2) if addr2 else ''
         
-        # Clean city
-        df.loc[idx, 'CleanedCity'] = self._to_camel_case(row.get('City', ''))
+        # Clean city (Title Case)
+        df.loc[idx, 'CleanedCity'] = self._to_title_case(row.get('City', ''))
         
         # Validate state
         state, state_valid, state_note = self.validator.validate_state(row.get('State', ''))
@@ -574,28 +656,36 @@ class HospitalDataCleaner:
             logger.info(f"Verified {idx + 1} addresses...")
     
     @staticmethod
-    def _to_camel_case(text: str) -> str:
-        """Convert text to camelCase"""
-        if not text or pd.isna(text) or text == 'NULL':
+    def _to_title_case(text: str) -> str:
+        """Convert text to Title Case with proper spacing"""
+        if not text or pd.isna(text) or str(text).upper() == 'NULL':
             return ''
         
-        words = re.split(r'[\s\-_]+', str(text).strip())
-        if not words:
-            return ''
+        # Clean and trim excess spaces
+        text = re.sub(r'\s+', ' ', str(text)).strip()
         
-        result = words[0].lower()
-        for word in words[1:]:
+        # Convert to title case
+        words = text.split()
+        result = []
+        
+        for word in words:
             if word:
-                result += word[0].upper() + word[1:].lower()
+                # Keep certain words lowercase (articles, prepositions) unless at start
+                if word.lower() in ['of', 'the', 'and', 'or', 'in', 'at', 'for'] and len(result) > 0:
+                    result.append(word.lower())
+                else:
+                    # Capitalize first letter, lowercase the rest
+                    result.append(word[0].upper() + word[1:].lower() if len(word) > 1 else word.upper())
         
-        return result
+        return ' '.join(result)
     
     @staticmethod
     def _clean_address_with_pound(address: str) -> str:
-        """Remove pound signs from addresses"""
-        if not address or pd.isna(address):
+        """Clean address keeping # for suite/unit numbers"""
+        if not address or pd.isna(address) or str(address).upper() == 'NULL':
             return ''
-        return address.replace('#', ' ').strip()
+        # Preserve # for suite/unit numbers but clean excess spaces
+        return re.sub(r'\s+', ' ', str(address)).strip()
     
     def generate_summary_report(self, df: pd.DataFrame) -> Dict:
         """Generate cleanup summary report"""
@@ -654,6 +744,7 @@ def main(enable_geocoding: bool = False):
         
         # Prepare output columns
         output_columns = [
+            'ClinicKey', 'HospitalKey',  # Preserve keys
             'CleanedHospitalName', 'CleanedAddressOne', 'CleanedAddressTwo',
             'CleanedCity', 'CleanedState', 'CleanedZIP',
             'CleanedPhone', 'CleanedFacimile'
@@ -674,9 +765,10 @@ def main(enable_geocoding: bool = False):
         output_df = cleaned_df[output_columns].copy()
         output_df.columns = output_df.columns.str.replace('Cleaned', '')
         
-        # Save results
-        logger.info(f"Saving cleaned data to {OUTPUT_FILE}...")
-        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+        # Save results - use different filename if geocoding was enabled
+        output_file = OUTPUT_FILE_WITH_GEO if enable_geocoding else OUTPUT_FILE
+        logger.info(f"Saving cleaned data to {output_file}...")
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             output_df.to_excel(writer, sheet_name='Cleaned Data', index=False)
         
         # Generate report
@@ -702,6 +794,9 @@ def main(enable_geocoding: bool = False):
         print(f"Valid States: {report['validation_percentages']['states']}%")
         print(f"Valid ZIPs: {report['validation_percentages']['zips']}%")
         print(f"Valid Phones: {report['validation_percentages']['phones']}%")
+        print(f"Output File: {output_file}")
+        if enable_geocoding:
+            print("Address verification completed with geocoding")
         print("="*60)
         
         logger.info("Cleanup process completed successfully!")
