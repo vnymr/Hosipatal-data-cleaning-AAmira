@@ -68,93 +68,99 @@ logger = logging.getLogger(__name__)
 
 
 class AddressStandardizer:
-    """Handles address standardization and validation"""
-    
+    """Handles address standardization and validation (expand abbreviations)."""
+
     def __init__(self):
-        self.direction_mapping = {
-            'N.': 'North', 'N': 'North',
-            'S.': 'South', 'S': 'South',
-            'E.': 'East', 'E': 'East',
-            'W.': 'West', 'W': 'West',
-            'NE.': 'Northeast', 'NE': 'Northeast',
-            'NW.': 'Northwest', 'NW': 'Northwest',
-            'SE.': 'Southeast', 'SE': 'Southeast',
-            'SW.': 'Southwest', 'SW': 'Southwest'
+        # Direction expansions (normalized comparison)
+        self._dir_expand = {
+            'N': 'North', 'S': 'South', 'E': 'East', 'W': 'West',
+            'NE': 'Northeast', 'NW': 'Northwest', 'SE': 'Southeast', 'SW': 'Southwest'
         }
-        
-        self.street_type_mapping = {
-            'St.': 'Street', 'St': 'Street',
-            'Ave.': 'Avenue', 'Ave': 'Avenue',
-            'Blvd.': 'Boulevard', 'Blvd': 'Boulevard',
-            'Dr.': 'Drive', 'Dr': 'Drive',
-            'Rd.': 'Road', 'Rd': 'Road',
-            'Ln.': 'Lane', 'Ln': 'Lane',
-            'Ct.': 'Court', 'Ct': 'Court',
-            'Cir.': 'Circle', 'Cir': 'Circle',
-            'Pl.': 'Place', 'Pl': 'Place',
-            'Pkwy.': 'Parkway', 'Pkwy': 'Parkway',
-            'Hwy.': 'Highway', 'Hwy': 'Highway', 'HWY': 'Highway',
-            'Trl.': 'Trail', 'Trl': 'Trail',
-            'Way.': 'Way', 'Wy': 'Way', 'Wy.': 'Way',
-            'Sq.': 'Square', 'Sq': 'Square',
-            'Ter.': 'Terrace', 'Ter': 'Terrace',
-            'Pt.': 'Point', 'Pt': 'Point',
-            'Plaza.': 'Plaza', 'Plz': 'Plaza', 'Plz.': 'Plaza',
-            'Expy.': 'Expressway', 'Expy': 'Expressway',
-            'Fwy.': 'Freeway', 'Fwy': 'Freeway',
-            'Tpke.': 'Turnpike', 'Tpke': 'Turnpike'
+
+        # Street type expansions (normalized comparison)
+        self._street_expand = {
+            'ST': 'Street', 'AVE': 'Avenue', 'BLVD': 'Boulevard', 'DR': 'Drive',
+            'RD': 'Road', 'LN': 'Lane', 'CT': 'Court', 'CIR': 'Circle',
+            'PL': 'Place', 'PLZ': 'Plaza', 'TRL': 'Trail', 'TER': 'Terrace',
+            'PKWY': 'Parkway', 'HWY': 'Highway', 'TPKE': 'Turnpike', 'WAY': 'Way',
+            'SQ': 'Square', 'PT': 'Point', 'WY': 'Way'
         }
-        
-        self.direction_exceptions = [
-            'North Hill Road', 'North Shore Drive', 'South Park Avenue',
-            'East River Road', 'West End Boulevard'
-        ]
-    
+
+        # Unit expansions (normalized comparison)
+        self._unit_expand = {
+            'STE': 'Suite', 'SUITE': 'Suite',
+            'FL': 'Floor', 'FLOOR': 'Floor',
+            'APT': 'Apartment', 'APARTMENT': 'Apartment',
+            'BLDG': 'Building', 'BLD': 'Building', 'BUILDING': 'Building',
+            'UNIT': 'Unit'
+        }
+
     def standardize(self, address: str) -> str:
         """
-        Standardize address with direction and street type expansions
-        
+        Expand abbreviations for directions, street types, and units.
+
         Args:
             address: Raw address string
-            
+
         Returns:
-            Standardized address string
+            Expanded, trimmed address string (no placeholders; blank stays blank)
         """
         if not address or pd.isna(address):
             return ''
-        
+
         address = self._clean_null_values(address)
         address = self._trim_excess_spaces(address)
-        
-        # Check for exceptions
-        if any(exception in address for exception in self.direction_exceptions):
-            return address
-        
+
         # Tokenize and process
         tokens = address.split()
         new_tokens = []
-        
+
         for i, token in enumerate(tokens):
-            if token in self.direction_mapping and self._is_direction_context(tokens, i):
-                new_tokens.append(self.direction_mapping[token])
-            elif token in self.street_type_mapping and self._is_street_type_context(tokens, i):
-                new_tokens.append(self.street_type_mapping[token])
-            else:
-                new_tokens.append(token)
-        
+            # Normalize token for lookup without stripping punctuation like '#'
+            raw = token
+            core = raw.strip(',')
+            norm = core.rstrip('.').upper()
+
+            # Preserve unit numbers with '#'
+            if '#' in raw and norm == core.upper():
+                new_tokens.append(raw)
+                continue
+
+            # Directions: expand whenever recognized
+            if norm in self._dir_expand:
+                new_tokens.append(raw.replace(core, self._dir_expand[norm]))
+                continue
+
+            # Street type: expand when context indicates type or common lettered avenues
+            if norm in self._street_expand and self._is_street_type_context(tokens, i):
+                new_tokens.append(raw.replace(core, self._street_expand[norm]))
+                continue
+
+            # Units: expand
+            if norm in self._unit_expand:
+                new_tokens.append(raw.replace(core, self._unit_expand[norm]))
+                continue
+
+            new_tokens.append(raw)
+
         return ' '.join(new_tokens)
     
-    def _is_direction_context(self, tokens: List[str], index: int) -> bool:
-        """Check if token is likely a direction abbreviation"""
-        return index == 0 or (index > 0 and tokens[index-1].isdigit())
-    
     def _is_street_type_context(self, tokens: List[str], index: int) -> bool:
-        """Check if token is likely a street type abbreviation"""
+        """Heuristic: token is a street type if at end, before units/dir,
+        or before a lettered/numbered designator (e.g., 'Ave F', 'Rd 5')."""
         is_last = index == len(tokens) - 1
-        is_before_unit = (index < len(tokens) - 1 and 
-                         (tokens[index+1].startswith('#') or 
-                          tokens[index+1].lower() in ['suite', 'unit', 'apt']))
-        return is_last or is_before_unit
+        next_tok = tokens[index+1] if index < len(tokens) - 1 else ''
+        next_core = next_tok.strip(',').rstrip('.')
+        next_norm = next_core.upper()
+        # Unit-like next tokens
+        unit_like = {'#','STE','SUITE','FL','FLOOR','APT','APARTMENT','BLDG','BLD','BUILDING','UNIT'}
+        is_before_unit = (next_tok.startswith('#') or next_norm in unit_like)
+        # Following token is a direction e.g., 'NE', 'W'
+        dir_like = {'N','S','E','W','NE','NW','SE','SW'}
+        is_before_dir = next_norm in dir_like
+        # Lettered/numbered designators like 'F', '5', '5A'
+        is_lettered_follow = bool(re.match(r'^[A-Za-z]$|^\d+[A-Za-z]?$', next_core))
+        return is_last or is_before_unit or is_before_dir or is_lettered_follow
     
     @staticmethod
     def _clean_null_values(value: str) -> str:
@@ -361,7 +367,7 @@ class DataValidator:
     
     @staticmethod
     def format_phone(phone: str) -> Tuple[str, bool, str]:
-        """Format phone to (XXX) XXX-XXXX or empty for invalid/placeholder numbers"""
+        """Normalize phone to digits-only (10 digits) or empty for invalid/placeholder numbers"""
         if not phone or pd.isna(phone) or str(phone).upper() == 'NULL':
             return '', False, 'Empty phone number'
         
@@ -377,9 +383,8 @@ class DataValidator:
             digits = digits[1:]
         
         if len(digits) == 10:
-            # Format as (XXX) XXX-XXXX
-            formatted = f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-            return formatted, True, ''
+            # Return digits-only
+            return digits, True, ''
         elif len(digits) == 0:
             return '', False, 'No digits in phone'
         else:
@@ -532,6 +537,14 @@ class HospitalDataCleaner:
         self.validator = DataValidator()
         self.geocoding_service = GeocodingService()
         self.validation_errors = []
+        # Abbreviation map for general text (used for names)
+        self.general_abbrev = {
+            'highway': 'hwy', 'freeway': 'fwy', 'road': 'rd', 'street': 'st',
+            'avenue': 'ave', 'boulevard': 'blvd', 'drive': 'dr', 'lane': 'ln',
+            'parkway': 'pkwy', 'suite': 'ste',
+            'north': 'n', 'south': 's', 'east': 'e', 'west': 'w',
+            'saint': 'st'
+        }
     
     def clean_data(self, df: pd.DataFrame, enable_geocoding: bool = False) -> pd.DataFrame:
         """
@@ -560,6 +573,9 @@ class HospitalDataCleaner:
             if (idx + 1) % RECORDS_PER_PROGRESS_UPDATE == 0:
                 logger.info(f"Processed {idx + 1} records...")
         
+        # Impute missing/invalid fields within the same cleaned hospital name
+        cleaned_df = self._impute_missing_by_name(cleaned_df)
+
         logger.info(f"Cleanup complete! Processed {len(cleaned_df)} records.")
         return cleaned_df
     
@@ -588,15 +604,21 @@ class HospitalDataCleaner:
         df.loc[idx, 'ClinicKey'] = row.get('ClinicKey', '')
         df.loc[idx, 'HospitalKey'] = row.get('HospitalKey', '')
         
-        # Clean hospital name (Title Case)
-        df.loc[idx, 'CleanedHospitalName'] = self._to_title_case(row.get('HospitalName', ''))
+        # Clean hospital name: abbreviate terms, then camelCase
+        raw_name = row.get('HospitalName', '')
+        name_abbr = self._abbreviate_text(raw_name)
+        name_camel = self._to_camel_case(name_abbr)
+        # Normalize lingering all-caps VA at end to camel 'Va'
+        name_camel = re.sub(r'VA$', 'Va', name_camel)
+        df.loc[idx, 'CleanedHospitalName'] = name_camel
         
-        # Clean addresses (Title Case)
+        # Clean addresses: abbreviate via AddressStandardizer, then address-specific casing
         addr1 = self.address_standardizer.standardize(row.get('AddressOne', ''))
-        df.loc[idx, 'CleanedAddressOne'] = self._to_title_case(addr1)
+        df.loc[idx, 'CleanedAddressOne'] = self._to_address_case(addr1)
         
-        addr2 = self._clean_address_with_pound(row.get('AddressTwo', ''))
-        df.loc[idx, 'CleanedAddressTwo'] = self._to_title_case(addr2) if addr2 else ''
+        addr2_raw = self._clean_address_with_pound(row.get('AddressTwo', ''))
+        addr2_std = self.address_standardizer.standardize(addr2_raw) if addr2_raw else ''
+        df.loc[idx, 'CleanedAddressTwo'] = self._to_address_case(addr2_std) if addr2_std else ''
         
         # Clean city (Title Case)
         df.loc[idx, 'CleanedCity'] = self._to_title_case(row.get('City', ''))
@@ -637,6 +659,185 @@ class HospitalDataCleaner:
         
         # Set validation notes
         df.loc[idx, 'ValidationNotes'] = '; '.join(notes) if notes else 'All validations passed'
+
+    # ------------------------------
+    # Intra-name imputation helpers
+    # ------------------------------
+    @staticmethod
+    def _is_blank(val) -> bool:
+        return (val is None) or (pd.isna(val)) or (str(val).strip() == '')
+
+    @staticmethod
+    def _is_invalid_address(val: str) -> bool:
+        if not val or pd.isna(val):
+            return True
+        s = str(val).strip()
+        # Too short or no letters → invalid
+        if len(s) < 5:
+            return True
+        if not re.search(r'[A-Za-z]', s):
+            return True
+        return False
+
+    @staticmethod
+    def _is_invalid_city(val: str) -> bool:
+        if not val or pd.isna(val):
+            return True
+        s = str(val).strip()
+        if len(s) < 2:
+            return True
+        if not re.search(r'[A-Za-z]', s):
+            return True
+        return False
+
+    def _impute_missing_by_name(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Fill blanks/invalids using the most common valid value within the same CleanedHospitalName.
+        Only fills when there is a clear single value observed; never invents placeholders.
+        """
+        key = 'CleanedHospitalName'
+        if key not in df.columns:
+            return df
+
+        fields = [
+            ('CleanedAddressOne', None),
+            ('CleanedAddressTwo', None),
+            ('CleanedCity', None),
+            ('CleanedState', 'StateValid'),
+            ('CleanedZIP', 'ZipValid'),
+            ('CleanedPhone', 'PhoneValid'),
+            ('CleanedFacimile', 'FaxValid'),
+        ]
+
+        for name, group in df.groupby(key):
+            # Gather candidate values per field
+            for field, valid_flag in fields:
+                if field not in df.columns:
+                    continue
+                series = group[field]
+                # Filter to valid candidates
+                if field == 'CleanedPhone':
+                    candidates = group.loc[group['PhoneValid'] == 'Y', field]
+                elif field == 'CleanedFacimile':
+                    candidates = group.loc[group['FaxValid'] == 'Y', field]
+                elif field == 'CleanedState':
+                    candidates = group.loc[group['StateValid'] == 'Y', field]
+                elif field == 'CleanedZIP':
+                    candidates = group.loc[group['ZipValid'] == 'Y', field]
+                elif field.startswith('CleanedAddress'):
+                    candidates = group.loc[~group[field].apply(self._is_invalid_address), field]
+                else:
+                    candidates = group.loc[~group[field].apply(self._is_blank), field]
+
+                values = [str(v) for v in candidates if not self._is_blank(v)]
+                if not values:
+                    continue
+                # Choose the most common value; only if unique mode
+                from collections import Counter
+                cnt = Counter(values)
+                mode_val, mode_freq = cnt.most_common(1)[0]
+                # If there is a tie for top frequency, skip to avoid incorrect fills
+                top_freqs = [c for v,c in cnt.items() if c == mode_freq]
+                if len(top_freqs) > 1:
+                    continue
+
+                # Fill targets: blanks or invalids for the field
+                idxs = []
+                if field == 'CleanedPhone':
+                    idxs = group.index[(group['PhoneValid'] != 'Y') | df.loc[group.index, field].apply(self._is_blank)]
+                elif field == 'CleanedFacimile':
+                    idxs = group.index[(group['FaxValid'] != 'Y') | df.loc[group.index, field].apply(self._is_blank)]
+                elif field == 'CleanedState':
+                    idxs = group.index[(group['StateValid'] != 'Y') | df.loc[group.index, field].apply(self._is_blank)]
+                elif field == 'CleanedZIP':
+                    idxs = group.index[(group['ZipValid'] != 'Y') | df.loc[group.index, field].apply(self._is_blank)]
+                elif field.startswith('CleanedAddress'):
+                    idxs = group.index[df.loc[group.index, field].apply(self._is_invalid_address)]
+                elif field == 'CleanedCity':
+                    idxs = group.index[df.loc[group.index, field].apply(self._is_invalid_city)]
+                else:
+                    idxs = group.index[df.loc[group.index, field].apply(self._is_blank)]
+
+                if len(idxs) == 0:
+                    continue
+
+                # Apply fills
+                df.loc[idxs, field] = mode_val
+                # Update flags if applicable
+                if valid_flag:
+                    if valid_flag in df.columns:
+                        df.loc[idxs, valid_flag] = 'Y'
+                # Append note
+                df.loc[idxs, 'ValidationNotes'] = df.loc[idxs, 'ValidationNotes'].apply(
+                    lambda s: (s + '; Imputed ' + field.replace('Cleaned','') + ' by name') if s and s != 'All validations passed' else ('Imputed ' + field.replace('Cleaned','') + ' by name')
+                )
+
+        return df
+
+    def _abbreviate_text(self, text: str) -> str:
+        """Apply whole-word abbreviations to text using general_abbrev."""
+        if not text or pd.isna(text) or str(text).upper() == 'NULL':
+            return ''
+        s = str(text)
+        for full, abbr in self.general_abbrev.items():
+            # whole word, case-insensitive
+            s = re.sub(rf"\b{re.escape(full)}\b", abbr, s, flags=re.IGNORECASE)
+        # collapse spaces
+        return re.sub(r'\s+', ' ', s).strip()
+
+    @staticmethod
+    def _to_camel_case(text: str) -> str:
+        """Convert a string to camelCase (non-address fields) with better tokenization.
+
+        - Splits on non-alphanumerics
+        - Also splits on case-change boundaries like 'baypinesVA' -> ['baypines','VA']
+        - Keeps consecutive uppercase letters (e.g., 'VA', 'NE') as a single token
+        """
+        if not text:
+            return ''
+        s = str(text).strip()
+        # Replace non-alphanumerics with space
+        s = re.sub(r'[^A-Za-z0-9]+', ' ', s)
+        # Insert space before capitals following lowercase/digit (camel breaks)
+        s = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', s)
+        tokens = [t for t in s.split() if t]
+        if not tokens:
+            return ''
+        first = tokens[0].lower()
+        rest = [t[:1].upper() + t[1:].lower() if len(t) > 1 else t.upper() for t in tokens[1:]]
+        return ''.join([first] + rest)
+
+    @staticmethod
+    def _to_address_case(text: str) -> str:
+        """Title Case for addresses with sensible preservation rules.
+
+        - Title Case words generally
+        - Keep single-letter tokens (A-Z) uppercase
+        - Keep alphanumeric like '1E' with letter part uppercase (but ordinals like 34th use lowercase suffix)
+        - Do not introduce placeholders; blank stays blank
+        """
+        if not text:
+            return ''
+        words = re.sub(r'\s+', ' ', str(text)).strip().split(' ')
+        out = []
+        for w in words:
+            core = w.strip(',')
+            # Single-letter token
+            if re.fullmatch(r'[A-Za-z]', core):
+                nw = w.replace(core, core.upper())
+            # Numeric + letters (e.g., 1E, 12B)
+            elif re.fullmatch(r'\d+[A-Za-z]+', core):
+                num = re.match(r'\d+', core).group(0)
+                tail_raw = core[len(num):]
+                # Lowercase ordinal suffixes; otherwise keep letter part uppercase
+                if tail_raw.upper() in { 'ST', 'ND', 'RD', 'TH' }:
+                    tail = tail_raw.lower()
+                else:
+                    tail = tail_raw.upper()
+                nw = w.replace(core, num + tail)
+            else:
+                nw = w[:1].upper() + w[1:].lower() if len(w) > 1 else w.upper()
+            out.append(nw)
+        return ' '.join(out)
     
     def _geocode_address(self, idx: int, df: pd.DataFrame, 
                         address: str, city: str, state: str, 
@@ -764,6 +965,13 @@ def main(enable_geocoding: bool = False):
         # Create output dataframe
         output_df = cleaned_df[output_columns].copy()
         output_df.columns = output_df.columns.str.replace('Cleaned', '')
+        
+        # Ensure phone, fax, and ZIP are written as text digits-only
+        for col in ['Phone', 'Facimile', 'ZIP']:
+            if col in output_df.columns:
+                output_df[col] = output_df[col].apply(
+                    lambda x: (re.sub(r'\D', '', str(x)) if (pd.notna(x) and str(x).strip() != '') else '')
+                )
         
         # Save results - use different filename if geocoding was enabled
         output_file = OUTPUT_FILE_WITH_GEO if enable_geocoding else OUTPUT_FILE

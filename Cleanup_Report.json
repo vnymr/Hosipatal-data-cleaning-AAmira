@@ -1,28 +1,28 @@
 {
   "total_records": 1436,
-  "timestamp": "2025-09-04 16:39:35",
+  "timestamp": "2025-09-08 15:29:45",
   "validation_summary": {
-    "valid_states": 1402,
-    "invalid_states": 34,
-    "valid_zips": 1392,
-    "invalid_zips": 44,
-    "valid_phones": 1362,
-    "invalid_phones": 74,
-    "valid_fax": 630,
-    "invalid_fax": 806
+    "valid_states": 1421,
+    "invalid_states": 15,
+    "valid_zips": 1415,
+    "invalid_zips": 21,
+    "valid_phones": 1394,
+    "invalid_phones": 42,
+    "valid_fax": 965,
+    "invalid_fax": 471
   },
   "unique_validation_errors": [
-    "Invalid state: xx",
     "Invalid state: nan",
     "Invalid state: 34",
+    "Invalid state: xx",
+    "Invalid state: 1",
     "Invalid state: Rd",
-    "Invalid state: F",
-    "Invalid state: 1"
+    "Invalid state: F"
   ],
   "validation_percentages": {
-    "states": 97.63,
-    "zips": 96.94,
-    "phones": 94.85,
-    "fax": 43.87
+    "states": 98.96,
+    "zips": 98.54,
+    "phones": 97.08,
+    "fax": 67.2
   }
 }
