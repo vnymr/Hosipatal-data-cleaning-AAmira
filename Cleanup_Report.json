@@ -1,6 +1,6 @@
 {
   "total_records": 1436,
-  "timestamp": "2025-09-08 15:29:45",
+  "timestamp": "2025-09-09 20:14:51",
   "validation_summary": {
     "valid_states": 1421,
     "invalid_states": 15,
@@ -12,11 +12,11 @@
     "invalid_fax": 471
   },
   "unique_validation_errors": [
-    "Invalid state: nan",
     "Invalid state: 34",
     "Invalid state: xx",
-    "Invalid state: 1",
     "Invalid state: Rd",
+    "Invalid state: 1",
+    "Invalid state: nan",
     "Invalid state: F"
   ],
   "validation_percentages": {
