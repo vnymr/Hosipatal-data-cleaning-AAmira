@@ -40,7 +40,7 @@ COMPARISON_FILE = 'Before_After_Comparison.xlsx'
 VALIDATION_REPORT = 'Validation_Report.json'
 
 # Google Maps API Configuration
-GOOGLE_MAPS_API_KEY = 'AIzaSyDKgAcoQOKHsbg6KEjRX8UVXUCe7BFaLAc'
+GOOGLE_MAPS_API_KEY = 'AIzaSyDYnvtK34251XIiG-13OOtHzZZVB8kV5wA'
 # Rate limiting
 GOOGLE_MAPS_RATE_LIMIT = 0.02  # 50 requests per second
 NOMINATIM_RATE_LIMIT = 1.1  # 1 request per second
@@ -159,11 +159,12 @@ class DataCleaner:
 
 
 class GoogleMapsValidator:
-    """Handles Google Maps address validation"""
+    """Handles Google Maps address validation with fallback to Nominatim"""
     
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.gmaps = None
+        self.use_fallback = False
         self.stats = {
             'total': 0,
             'verified': 0,
@@ -178,44 +179,39 @@ class GoogleMapsValidator:
                 print("✓ Google Maps client initialized")
             except Exception as e:
                 print(f"✗ Failed to initialize Google Maps: {e}")
+                self.use_fallback = True
+        else:
+            self.use_fallback = True
+            
+        if self.use_fallback:
+            print("✓ Using Nominatim (OpenStreetMap) for address validation")
     
     def validate_address(self, address: str, city: str, state: str, zip_code: str) -> Dict:
-        """Validate address using Google Maps Places API (find_place + details)"""
+        """Validate address using Google Maps or fallback service"""
         self.stats['total'] += 1
         
-        if not self.gmaps:
-            self.stats['errors'] += 1
-            return self._error_result("Google Maps not available")
+        # Use fallback if Google Maps not available
+        if self.use_fallback or not self.gmaps:
+            return self._validate_with_nominatim(address, city, state, zip_code)
         
         # Build full address
         full_address = f"{address}, {city}, {state} {zip_code}, USA"
         
         try:
-            # Use Places API to find a place by text query
-            find_resp = self.gmaps.find_place(
+            # Use Geocoding API directly
+            geocode_results = self.gmaps.geocode(
                 full_address,
-                'textquery',
-                fields=['place_id', 'formatted_address', 'geometry']
+                components={'country': 'US'},
+                region='us'
             )
-            candidates = (find_resp or {}).get('candidates', [])
-            if not candidates:
+            
+            if not geocode_results:
                 self.stats['invalid'] += 1
                 return self._invalid_result(full_address)
             
-            candidate = candidates[0]
-            place_id = candidate.get('place_id')
-            details_result = {}
-            if place_id:
-                # Fetch detailed place info to get address components
-                details_resp = self.gmaps.place(
-                    place_id,
-                    fields=['formatted_address', 'geometry', 'address_component']
-                )
-                details_result = (details_resp or {}).get('result', {})
-            
-            # Prefer details result if available, else fall back to candidate
-            base_result = details_result if details_result else candidate
-            validated = self._parse_result(base_result, full_address)
+            # Get the first (best) result
+            result = geocode_results[0]
+            validated = self._parse_result(result, full_address)
             
             # Update statistics
             if validated['is_valid']:
@@ -235,20 +231,25 @@ class GoogleMapsValidator:
             error_msg = str(e)
             
             # Check for common API errors
-            if 'REQUEST_DENIED' in error_msg or 'PERMISSION_DENIED' in error_msg:
-                print("\n⚠ Google Maps API Error: Places API not enabled or key restricted")
-                print("  Please enable Places API and ensure key restrictions allow server-side calls.")
-                self.gmaps = None  # Disable for rest of session
+            if 'REQUEST_DENIED' in error_msg or 'OVER_QUERY_LIMIT' in error_msg:
+                if 'REQUEST_DENIED' in error_msg:
+                    print("\n⚠ Google Maps API Error: Access denied")
+                elif 'OVER_QUERY_LIMIT' in error_msg:
+                    print("\n⚠ Google Maps API Error: Query limit reached")
+                print("  Switching to Nominatim (OpenStreetMap) for address validation...")
+                self.gmaps = None  # Disable Google Maps
+                self.use_fallback = True
+                # Try with fallback
+                return self._validate_with_nominatim(address, city, state, zip_code)
             
             return self._error_result(error_msg)
     
     def _parse_result(self, result: Dict, original: str) -> Dict:
-        """Parse Google Maps result (compatible with Places Details or Geocoding)"""
+        """Parse Google Maps geocoding result"""
         formatted = result.get('formatted_address', '')
         geometry = result.get('geometry', {})
         location = geometry.get('location', {'lat': None, 'lng': None})
-        # Places Details typically does not include location_type; default to ROOFTOP
-        location_type = geometry.get('location_type', 'ROOFTOP')
+        location_type = geometry.get('location_type', 'APPROXIMATE')
         components = result.get('address_components', [])
         
         # Parse components
@@ -337,6 +338,108 @@ class GoogleMapsValidator:
             'latitude': None,
             'longitude': None,
             'location_type': 'ERROR'
+        }
+    
+    def _validate_with_nominatim(self, address: str, city: str, state: str, zip_code: str) -> Dict:
+        """Validate address using Nominatim (OpenStreetMap) as fallback"""
+        full_address = f"{address}, {city}, {state} {zip_code}, USA"
+        
+        try:
+            # Call Nominatim API
+            url = "https://nominatim.openstreetmap.org/search"
+            params = {
+                'q': full_address,
+                'format': 'json',
+                'addressdetails': 1,
+                'limit': 1,
+                'countrycodes': 'us'
+            }
+            headers = {'User-Agent': 'HospitalDataValidator/1.0'}
+            
+            response = requests.get(url, params=params, headers=headers, timeout=10)
+            time.sleep(NOMINATIM_RATE_LIMIT)  # Rate limiting for Nominatim
+            
+            if response.status_code == 200 and response.json():
+                result = response.json()[0]
+                return self._parse_nominatim_result(result, full_address)
+            else:
+                self.stats['invalid'] += 1
+                return self._invalid_result(full_address)
+                
+        except Exception as e:
+            self.stats['errors'] += 1
+            return self._error_result(str(e))
+    
+    def _parse_nominatim_result(self, result: Dict, original: str) -> Dict:
+        """Parse Nominatim result"""
+        display_name = result.get('display_name', '')
+        lat = result.get('lat', '')
+        lon = result.get('lon', '')
+        address = result.get('address', {})
+        
+        # Determine confidence based on result type
+        place_rank = int(result.get('place_rank', 30))
+        if place_rank <= 20:
+            confidence = 'HIGH'
+            status = 'Verified - Exact Match'
+            is_valid = True
+        elif place_rank <= 25:
+            confidence = 'MEDIUM'
+            status = 'Verified - Area Level'
+            is_valid = True
+        else:
+            confidence = 'LOW'
+            status = 'Approximate Only'
+            is_valid = False
+        
+        # Build formatted address
+        house_number = address.get('house_number', '')
+        road = address.get('road', '')
+        city_name = address.get('city', '') or address.get('town', '') or address.get('village', '')
+        state_name = address.get('state', '')
+        postcode = address.get('postcode', '')
+        
+        formatted_parts = []
+        if house_number and road:
+            formatted_parts.append(f"{house_number} {road}")
+        elif road:
+            formatted_parts.append(road)
+        if city_name:
+            formatted_parts.append(city_name)
+        if state_name and postcode:
+            formatted_parts.append(f"{state_name} {postcode}")
+            
+        formatted = ', '.join(formatted_parts) if formatted_parts else display_name
+        
+        # Check if corrected
+        orig_clean = re.sub(r'[^a-zA-Z0-9]', '', original.lower())
+        formatted_clean = re.sub(r'[^a-zA-Z0-9]', '', formatted.lower())
+        was_corrected = SequenceMatcher(None, orig_clean, formatted_clean).ratio() < 0.9
+        
+        if is_valid:
+            self.stats['verified'] += 1
+            if was_corrected:
+                self.stats['corrected'] += 1
+        else:
+            self.stats['invalid'] += 1
+        
+        return {
+            'original': original,
+            'formatted': formatted,
+            'is_valid': is_valid,
+            'status': status,
+            'confidence': confidence,
+            'was_corrected': was_corrected,
+            'components': {
+                'street_number': house_number,
+                'street': road,
+                'city': city_name,
+                'state': state_name,
+                'zip': postcode
+            },
+            'latitude': float(lat) if lat else None,
+            'longitude': float(lon) if lon else None,
+            'location_type': 'NOMINATIM'
         }
     
     def get_statistics(self) -> Dict:
@@ -591,8 +694,8 @@ def main():
     # Process data
     processor = HospitalDataProcessor()
     
-    # Process all records (set limit=10 for testing)
-    processor.process_file(INPUT_FILE, limit=None)  # Set limit=10 for testing
+    # Process ALL records
+    processor.process_file(INPUT_FILE, limit=None)  # Process all 1,436 records
     
     # Save results
     processor.save_results()
