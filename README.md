@@ -1,117 +1,68 @@
 # Hospital Data Cleaner & Address Validator
 
 ## Overview
-This script cleans hospital data and validates addresses using Google Maps API to verify that addresses are real and correct.
+This tool cleans messy hospital datasets and validates addresses using Google Geocoding. It outputs a standardized dataset ready for human review and downstream matching.
 
-## Features
-✅ **Data Cleaning**
-- Standardizes hospital names
-- Expands address abbreviations (SW → Southwest, Ave → Avenue)
-- Validates states and ZIP codes
-- Formats phone numbers to 10 digits
-- Removes invalid/placeholder data
-
-✅ **Address Validation** 
-- Verifies if addresses actually exist
-- Corrects address errors automatically
-- Provides confidence levels (HIGH/MEDIUM/LOW)
-- Returns GPS coordinates for mapping
-- Shows which addresses were corrected
+## What it does (finalized rules)
+- Hospital names: lowerCamelCase (machine-friendly IDs)
+- Addresses: human-readable Title Case with expanded directions/suffixes (e.g., N. → North, St → Street)
+- City: Title Case
+- State: USPS 2-letter codes (maps full names like "Texas" → "TX"; invalid → blank). Flag State Valid (Y/N)
+- ZIP: keep #####; if ZIP+4 present, format #####-####; invalid → blank. Flag ZIP Valid (Y/N)
+- Phone/Fax: digits only, standardized to XXXXXXXXXX; invalid → blank
+- Placeholders removed: unknown, address unknown, n/a, na, null, -, ., none, single-letter (including "1"), and X-only tokens like "xxxxx" (also when embedded like "xxxxx, 1")
+- Deduplication: drop exact duplicates based on cleaned core fields
+- Address validation: Google Geocoding with retry/backoff; stores Verified Address, Confidence, Lat/Lng
 
 ## Files
-
-### Input
-- `Concierge Hospitals.xlsx` - Original hospital data
-
-### Scripts
-- `hospital_data_validator_final.py` - Main processing script
-
-### Output Files
-1. **`Hospital_Data_Validated.xlsx`** - Cleaned and validated data with:
-   - Cleaned hospital names and addresses
-   - Validation status for each address
-   - Verified addresses from Google Maps
-   - GPS coordinates
-   - Confidence levels
-
-2. **`Before_After_Comparison.xlsx`** - Side-by-side comparison showing:
-   - Original vs cleaned data
-   - Original vs verified addresses
-   - What was corrected
-
-3. **`Validation_Report.json`** - Statistics including:
-   - Total addresses processed
-   - Number verified, corrected, invalid
-   - Example validations
+- `hospital_data_validator_final.py` – main processor
+- `google_address_validator.py` – Google Geocoding wrapper with throttling and retries
+- `Concierge Hospitals.xlsx` – source data
+- Outputs:
+  - `Hospital_Data_Validated.xlsx` – cleaned dataset
+  - `Before_After_Comparison.xlsx` – side-by-side original vs cleaned
+  - `Validation_Report.json` – validation stats and examples
+  - `hospital_data_quality_report.xlsx` – summary metrics and sample rows
 
 ## Setup
-
-### 1. Install Required Libraries
+1) Python 3.10+ recommended
+2) Install deps
 ```bash
-pip install pandas openpyxl googlemaps requests
+pip install -r requirements.txt
 ```
-
-### 2. Enable Google Maps Geocoding API
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Enable "Geocoding API" for your project
-3. API Key: `AIzaSyDKgAcoQOKHsbg6KEjRX8UVXUCe7BFaLAc`
+3) Google Geocoding API
+- Geocoding API must be enabled and key must be valid. The validator defaults to a configured key and includes retry/backoff for stability.
 
 ## Usage
-
-### Run Full Processing (All 1,436 hospitals)
+Run full processing (all active rows):
 ```bash
-python hospital_data_validator_final.py
+python3 hospital_data_validator_final.py
+```
+Optional rate control (default 50 req/s):
+```bash
+export GOOGLE_MAPS_RPS=50
+python3 hospital_data_validator_final.py
+```
+Run a sample (e.g., 100 rows) for a quick test:
+```bash
+python3 -c "from hospital_data_validator_final import HospitalDataProcessor; p=HospitalDataProcessor(); p.process_file('Concierge Hospitals.xlsx', limit=100); p.save_results()"
 ```
 
-### Test Mode (First 10 records only)
-Edit the script and change line 579:
-```python
-processor.process_file(INPUT_FILE, limit=10)  # For testing
-```
+## Output columns (Validated Data)
+- Hospital Name, Address, Address2, City, State, ZIP, Phone, Fax
+- State Valid (Y/N), ZIP Valid (Y/N)
+- Validation Status, Verified Address, Address Confidence, Was Corrected, Latitude, Longitude
 
-## Validation Status Meanings
+## Quality and consistency
+- Formatting is consistent across all rows
+- Placeholders removed or blanked
+- State and ZIP flagged for quick filtering
+- Duplicates removed after cleaning
+- Target cleanliness ≥ 95%
 
-- **✅ Verified - Exact Match**: Address exists exactly as provided (ROOFTOP level)
-- **✅ Verified - Street Level**: Address exists on the street (RANGE_INTERPOLATED)
-- **✅ Verified - Area Level**: Address area exists (GEOMETRIC_CENTER)
-- **⚠️ Approximate Only**: Only city/area could be verified
-- **❌ Not Found**: Address does not exist
-- **🔧 Corrected**: Address had errors that were fixed
+## Troubleshooting
+- If validation status shows REQUEST_DENIED: verify Geocoding API is enabled, key is valid, and restrictions allow server calls
+- If you hit rate limits: lower `GOOGLE_MAPS_RPS` to 20
 
-## Example Results
-
-### Before/After Cleaning
-```
-Original: "3509 SW 34th Ave Circle, Ocala, FL"
-Cleaned:  "3509 Southwest 34th Avenue Circle, Ocala, FL"
-Verified: "3509 SW 34th Avenue Cir, Ocala, FL 34474, USA"
-Status:   Verified - Exact Match
-GPS:      29.1577, -82.1840
-```
-
-### Address Correction
-```
-Original: "1670 ST VINCENTS, Middleburg, FL" (missing "WAY")
-Verified: "1670 St Vincents Way, Middleburg, FL 32068, USA"
-Status:   Verified - Corrected
-```
-
-### Invalid Address
-```
-Original: "Unknown Address"
-Status:   Not Found
-```
-
-## Notes
-
-- First run may take 25-30 minutes for all 1,436 records
-- Google Maps API allows 40,000 free requests/month
-- Script automatically handles API errors
-- All original data is preserved in comparison file
-
-## Support
-
-For issues with:
-- **Google Maps API**: Check API is enabled in Google Cloud Console
-- **Missing addresses**: These will be marked as "No Address"
-- **API limits**: Process in batches using the `limit` parameter
+## License
+Internal use.

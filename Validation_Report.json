@@ -1,16 +1,37 @@
 {
-  "timestamp": "2025-09-11T10:10:13.712965",
+  "timestamp": "2025-09-12T06:27:35.176661",
   "statistics": {
-    "total_processed": 5,
-    "verified": 0,
-    "verified_percentage": 0.0,
-    "corrected": 0,
-    "invalid": 0,
-    "errors": 5
+    "total_processed": 1436,
+    "verified": 1368,
+    "verified_percentage": 95.26,
+    "corrected": 572,
+    "invalid": 68,
+    "errors": 0
   },
   "examples": {
-    "verified": [],
-    "corrected": [],
+    "verified": [
+      {
+        "original": "3509 SW 34th Avenue Circle",
+        "verified": "3509 SW 34th Ave Cir, Ocala, FL 34474, USA",
+        "confidence": "HIGH"
+      },
+      {
+        "original": "1670 ST VINCENTS WAY",
+        "verified": "St Vincents Wy, Florida 32068, USA",
+        "confidence": "MEDIUM"
+      },
+      {
+        "original": "601 East Altamonte Dr",
+        "verified": "601 E Altamonte Dr, Altamonte Springs, FL 32701, USA",
+        "confidence": "HIGH"
+      }
+    ],
+    "corrected": [
+      {
+        "original": "60 Memorial Pkwy",
+        "corrected": "Palm Coast, FL 32164, USA"
+      }
+    ],
     "invalid": []
   }
 }

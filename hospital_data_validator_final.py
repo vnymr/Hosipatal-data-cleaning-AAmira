@@ -23,15 +23,7 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, Tuple, List, Optional
-import requests
-from difflib import SequenceMatcher
-
-# Try to import googlemaps
-try:
-    import googlemaps
-    GOOGLEMAPS_AVAILABLE = True
-except ImportError:
-    GOOGLEMAPS_AVAILABLE = False
+from google_address_validator import GoogleMapsValidator
 
 # Configuration
 INPUT_FILE = 'Concierge Hospitals.xlsx'
@@ -39,11 +31,12 @@ OUTPUT_FILE = 'Hospital_Data_Validated.xlsx'
 COMPARISON_FILE = 'Before_After_Comparison.xlsx'
 VALIDATION_REPORT = 'Validation_Report.json'
 
-# Google Maps API Configuration
-GOOGLE_MAPS_API_KEY = 'AIzaSyDYnvtK34251XIiG-13OOtHzZZVB8kV5wA'
-# Rate limiting
-GOOGLE_MAPS_RATE_LIMIT = 0.02  # 50 requests per second
-NOMINATIM_RATE_LIMIT = 1.1  # 1 request per second
+# Google Maps API Configuration via environment
+# GOOGLE_MAPS_API_KEY should be set in the environment for cross-system portability
+GOOGLE_MAPS_RPS = float(os.environ.get('GOOGLE_MAPS_RPS', '50'))
+
+# Logging
+INVALID_STATE_LOG = 'invalid_states.log'
 
 # US States
 VALID_US_STATES = {
@@ -55,44 +48,142 @@ VALID_US_STATES = {
     'DC', 'PR', 'VI', 'AS', 'GU', 'MP'
 }
 
+# Map full state names to USPS codes (basic normalization)
+STATE_NAME_TO_CODE = {
+    'ALABAMA': 'AL', 'ALASKA': 'AK', 'ARIZONA': 'AZ', 'ARKANSAS': 'AR', 'CALIFORNIA': 'CA',
+    'COLORADO': 'CO', 'CONNECTICUT': 'CT', 'DELAWARE': 'DE', 'FLORIDA': 'FL', 'GEORGIA': 'GA',
+    'HAWAII': 'HI', 'IDAHO': 'ID', 'ILLINOIS': 'IL', 'INDIANA': 'IN', 'IOWA': 'IA',
+    'KANSAS': 'KS', 'KENTUCKY': 'KY', 'LOUISIANA': 'LA', 'MAINE': 'ME', 'MARYLAND': 'MD',
+    'MASSACHUSETTS': 'MA', 'MICHIGAN': 'MI', 'MINNESOTA': 'MN', 'MISSISSIPPI': 'MS', 'MISSOURI': 'MO',
+    'MONTANA': 'MT', 'NEBRASKA': 'NE', 'NEVADA': 'NV', 'NEW HAMPSHIRE': 'NH', 'NEW JERSEY': 'NJ',
+    'NEW MEXICO': 'NM', 'NEW YORK': 'NY', 'NORTH CAROLINA': 'NC', 'NORTH DAKOTA': 'ND', 'OHIO': 'OH',
+    'OKLAHOMA': 'OK', 'OREGON': 'OR', 'PENNSYLVANIA': 'PA', 'RHODE ISLAND': 'RI', 'SOUTH CAROLINA': 'SC',
+    'SOUTH DAKOTA': 'SD', 'TENNESSEE': 'TN', 'TEXAS': 'TX', 'UTAH': 'UT', 'VERMONT': 'VT',
+    'VIRGINIA': 'VA', 'WASHINGTON': 'WA', 'WEST VIRGINIA': 'WV', 'WISCONSIN': 'WI', 'WYOMING': 'WY',
+    'DISTRICT OF COLUMBIA': 'DC'
+}
+
 
 class DataCleaner:
+    @staticmethod
+    def is_placeholder(value: str) -> bool:
+        """Return True if the value is a known placeholder or junk."""
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return True
+        s = str(value).strip().strip('"\'')
+        if s == '':
+            return True
+        lower = s.lower()
+        placeholders = {
+            'unknown', 'address unknown', 'n/a', 'na', 'null', '-', '.', 'none'
+        }
+        if lower in placeholders:
+            return True
+        # Single-character values or a lone '1' treated as placeholders
+        if len(s) == 1:
+            return True
+        if s == '1':
+            return True
+        # Repeated X/x pattern (e.g., 'xxxxx', 'XXX') considered placeholder
+        letters_only = re.sub(r'[^A-Za-z]', '', s)
+        if len(letters_only) >= 3 and set(letters_only.upper()) == {'X'}:
+            return True
+        return False
+
+    @staticmethod
+    def _all_tokens_placeholder(text: str) -> bool:
+        """Return True if all comma/space separated tokens are placeholders."""
+        tokens = [t.strip() for t in re.split(r'[\s,]+', str(text)) if t and t.strip()]
+        if not tokens:
+            return True
+        return all(DataCleaner.is_placeholder(t) for t in tokens)
+
+    @staticmethod
+    def _remove_placeholder_tokens(text: str) -> str:
+        """Remove placeholder-like tokens (e.g., Xxxxxx, Unknown, 1) from address while preserving delimiters."""
+        parts = re.split(r'(,|\s+)', str(text))  # keep delimiters
+        kept = []
+        for part in parts:
+            if part is None or part == '':
+                continue
+            # Delimiters preserved
+            if re.fullmatch(r'(,|\s+)', part):
+                kept.append(part)
+                continue
+            token = part.strip()
+            if DataCleaner.is_placeholder(token):
+                continue
+            # Repeated X/x letters length>=2 considered placeholder token
+            letters_only = re.sub(r'[^A-Za-z]', '', token)
+            if len(letters_only) >= 2 and set(letters_only.upper()) == {'X'}:
+                continue
+            kept.append(part)
+        result = ''.join(kept)
+        # Normalize spaces/commas
+        result = re.sub(r'\s+,\s*', ', ', result)
+        result = re.sub(r'\s+', ' ', result).strip(' ,')
+        return result
+
     """Handles data cleaning and standardization"""
     
     @staticmethod
-    def clean_hospital_name(name: str) -> str:
-        """Clean and standardize hospital name"""
-        if not name or pd.isna(name) or str(name).upper() == 'NULL':
+    def to_camel_case(text: str) -> str:
+        """Convert a phrase to lowerCamelCase (alphanumeric only, preserves leading numbers)."""
+        if not text or pd.isna(text):
             return ''
-        
-        # Remove extra spaces
-        name = re.sub(r'\s+', ' ', str(name)).strip()
-        
-        # Title case with exceptions
-        words = name.split()
-        result = []
-        for i, word in enumerate(words):
-            if word.lower() in ['of', 'the', 'and', 'for', 'at'] and i > 0:
-                result.append(word.lower())
-            else:
-                result.append(word[0].upper() + word[1:].lower() if len(word) > 1 else word.upper())
-        
-        return ' '.join(result)
-    
+        # Normalize whitespace and strip
+        normalized = re.sub(r'\s+', ' ', str(text)).strip()
+        # Remove apostrophes and periods to normalize possessives and abbreviations
+        normalized = re.sub(r"[\.'’]", '', normalized)
+        # Split on any non-alphanumeric boundary
+        tokens = re.split(r'[^A-Za-z0-9]+', normalized)
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return ''
+        # If the first token is numeric, keep as-is; otherwise lowercase it
+        first = tokens[0]
+        if first.isdigit():
+            camel = first
+        else:
+            camel = first.lower()
+        # Capitalize subsequent tokens
+        for token in tokens[1:]:
+            camel += token[:1].upper() + token[1:].lower()
+        return camel
+
     @staticmethod
-    def clean_address(address: str) -> str:
-        """Clean and standardize address"""
-        if not address or pd.isna(address):
+    def to_title_phrase(text: str) -> str:
+        """Title-case a phrase with minor word exceptions."""
+        if not text or pd.isna(text):
             return ''
-        
-        address = str(address).strip()
-        
-        # Check for invalid addresses
-        if address.lower() in ['unknown', 'n/a', 'na', 'null']:
+        text = re.sub(r'\s+', ' ', str(text)).strip()
+        minor = {'of', 'the', 'and', 'for', 'at', 'in', 'on', 'a', 'an'}
+        words = text.split(' ')
+        result = []
+        for i, w in enumerate(words):
+            lw = w.lower()
+            if i > 0 and lw in minor:
+                result.append(lw)
+            else:
+                result.append(lw[:1].upper() + lw[1:])
+        return ' '.join(result)
+
+    @staticmethod
+    def standardize_street_and_directions(text: str) -> str:
+        """Expand common street suffixes and directional abbreviations."""
+        if not text or pd.isna(text):
             return ''
-        
-        # Expand common abbreviations
+        s = str(text).strip()
+        # Expand with word boundaries; avoid changing existing full words like "North Hill"
         replacements = {
+            r'(?<!\w)NE\.?(?!\w)': 'Northeast',
+            r'(?<!\w)NW\.?((?!\w))': 'Northwest',
+            r'(?<!\w)SE\.?(?!\w)': 'Southeast',
+            r'(?<!\w)SW\.?(?!\w)': 'Southwest',
+            r'(?<!\w)N\.?(?!\w)': 'North',
+            r'(?<!\w)S\.?((?!\w))': 'South',
+            r'(?<!\w)E\.?(?!\w)': 'East',
+            r'(?<!\w)W\.?((?!\w))': 'West',
             r'\bST\b': 'Street',
             r'\bAVE\b': 'Avenue',
             r'\bBLVD\b': 'Boulevard',
@@ -101,26 +192,43 @@ class DataCleaner:
             r'\bLN\b': 'Lane',
             r'\bCT\b': 'Court',
             r'\bPKWY\b': 'Parkway',
-            r'\bHWY\b': 'Highway',
-            r'\bN\b': 'North',
-            r'\bS\b': 'South',
-            r'\bE\b': 'East',
-            r'\bW\b': 'West',
-            r'\bNE\b': 'Northeast',
-            r'\bNW\b': 'Northwest',
-            r'\bSE\b': 'Southeast',
-            r'\bSW\b': 'Southwest'
+            r'\bHWY\b': 'Highway'
         }
+        for pattern, repl in replacements.items():
+            s = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+
+    @staticmethod
+    def clean_hospital_name(name: str) -> str:
+        """Clean and standardize hospital name to camelCase."""
+        if DataCleaner.is_placeholder(name):
+            return ''
+        return DataCleaner.to_camel_case(name)
+    
+    @staticmethod
+    def clean_address(address: str) -> str:
+        """Clean and standardize address to a human-readable form (not camelCase).
+        Example: "123 N. Main St" -> "123 North Main Street".
+        """
+        if DataCleaner.is_placeholder(address):
+            return ''
         
-        for pattern, replacement in replacements.items():
-            address = re.sub(pattern, replacement, address, flags=re.IGNORECASE)
-        
-        return re.sub(r'\s+', ' ', address).strip()
+        raw = str(address).strip()
+        # If composed entirely of placeholder tokens like 'xxxxx, 1', drop it
+        if DataCleaner._all_tokens_placeholder(raw):
+            return ''
+        # Remove placeholder-like tokens embedded in the address
+        raw = DataCleaner._remove_placeholder_tokens(raw)
+        if not raw:
+            return ''
+        std = DataCleaner.standardize_street_and_directions(raw)
+        return DataCleaner.to_title_phrase(std)
     
     @staticmethod
     def clean_phone(phone: str) -> str:
-        """Clean and format phone number"""
-        if not phone or pd.isna(phone) or str(phone).upper() == 'NULL':
+        """Clean and format phone number as 10 digits only (no punctuation)."""
+        if DataCleaner.is_placeholder(phone):
             return ''
         
         # Extract digits only
@@ -139,312 +247,40 @@ class DataCleaner:
     @staticmethod
     def validate_state(state: str) -> Tuple[str, bool]:
         """Validate state code"""
-        if not state or pd.isna(state):
+        if DataCleaner.is_placeholder(state):
             return '', False
         
-        state = str(state).strip().upper()
-        return state, state in VALID_US_STATES
+        s = str(state).strip()
+        code = s.upper()
+        if code in VALID_US_STATES:
+            return code, True
+        # Try mapping full names
+        full = re.sub(r'\s+', ' ', s).strip().upper()
+        if full in STATE_NAME_TO_CODE:
+            return STATE_NAME_TO_CODE[full], True
+        # Common obvious typos: remove periods and extra spaces, try again
+        full2 = re.sub(r'[\.]', '', full)
+        if full2 in STATE_NAME_TO_CODE:
+            return STATE_NAME_TO_CODE[full2], True
+        return code, False
     
     @staticmethod
     def validate_zip(zip_code: str) -> Tuple[str, bool]:
         """Validate ZIP code"""
-        if not zip_code or pd.isna(zip_code):
+        if DataCleaner.is_placeholder(zip_code):
             return '', False
         
         digits = re.sub(r'\D', '', str(zip_code))
-        
+        if len(digits) >= 9:
+            base = digits[:5]
+            plus4 = digits[5:9]
+            return f"{base}-{plus4}", True
         if len(digits) >= 5:
             return digits[:5], True
-        return digits, False
+        return '', False
 
 
-class GoogleMapsValidator:
-    """Handles Google Maps address validation with fallback to Nominatim"""
-    
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.gmaps = None
-        self.use_fallback = False
-        self.stats = {
-            'total': 0,
-            'verified': 0,
-            'corrected': 0,
-            'invalid': 0,
-            'errors': 0
-        }
-        
-        if GOOGLEMAPS_AVAILABLE:
-            try:
-                self.gmaps = googlemaps.Client(key=api_key)
-                print("✓ Google Maps client initialized")
-            except Exception as e:
-                print(f"✗ Failed to initialize Google Maps: {e}")
-                self.use_fallback = True
-        else:
-            self.use_fallback = True
-            
-        if self.use_fallback:
-            print("✓ Using Nominatim (OpenStreetMap) for address validation")
-    
-    def validate_address(self, address: str, city: str, state: str, zip_code: str) -> Dict:
-        """Validate address using Google Maps or fallback service"""
-        self.stats['total'] += 1
-        
-        # Use fallback if Google Maps not available
-        if self.use_fallback or not self.gmaps:
-            return self._validate_with_nominatim(address, city, state, zip_code)
-        
-        # Build full address
-        full_address = f"{address}, {city}, {state} {zip_code}, USA"
-        
-        try:
-            # Use Geocoding API directly
-            geocode_results = self.gmaps.geocode(
-                full_address,
-                components={'country': 'US'},
-                region='us'
-            )
-            
-            if not geocode_results:
-                self.stats['invalid'] += 1
-                return self._invalid_result(full_address)
-            
-            # Get the first (best) result
-            result = geocode_results[0]
-            validated = self._parse_result(result, full_address)
-            
-            # Update statistics
-            if validated['is_valid']:
-                self.stats['verified'] += 1
-                if validated['was_corrected']:
-                    self.stats['corrected'] += 1
-            else:
-                self.stats['invalid'] += 1
-            
-            # Rate limiting
-            time.sleep(GOOGLE_MAPS_RATE_LIMIT)
-            
-            return validated
-            
-        except Exception as e:
-            self.stats['errors'] += 1
-            error_msg = str(e)
-            
-            # Check for common API errors
-            if 'REQUEST_DENIED' in error_msg or 'OVER_QUERY_LIMIT' in error_msg:
-                if 'REQUEST_DENIED' in error_msg:
-                    print("\n⚠ Google Maps API Error: Access denied")
-                elif 'OVER_QUERY_LIMIT' in error_msg:
-                    print("\n⚠ Google Maps API Error: Query limit reached")
-                print("  Switching to Nominatim (OpenStreetMap) for address validation...")
-                self.gmaps = None  # Disable Google Maps
-                self.use_fallback = True
-                # Try with fallback
-                return self._validate_with_nominatim(address, city, state, zip_code)
-            
-            return self._error_result(error_msg)
-    
-    def _parse_result(self, result: Dict, original: str) -> Dict:
-        """Parse Google Maps geocoding result"""
-        formatted = result.get('formatted_address', '')
-        geometry = result.get('geometry', {})
-        location = geometry.get('location', {'lat': None, 'lng': None})
-        location_type = geometry.get('location_type', 'APPROXIMATE')
-        components = result.get('address_components', [])
-        
-        # Parse components
-        parsed = {
-            'street_number': '',
-            'street': '',
-            'city': '',
-            'state': '',
-            'zip': ''
-        }
-        
-        for comp in components:
-            types = comp.get('types', [])
-            if 'street_number' in types:
-                parsed['street_number'] = comp['long_name']
-            elif 'route' in types:
-                parsed['street'] = comp['long_name']
-            elif 'locality' in types:
-                parsed['city'] = comp['long_name']
-            elif 'administrative_area_level_1' in types:
-                parsed['state'] = comp['short_name']
-            elif 'postal_code' in types:
-                parsed['zip'] = comp['long_name']
-        
-        # Determine validation quality
-        if location_type == 'ROOFTOP':
-            confidence = 'HIGH'
-            status = 'Verified - Exact Match'
-            is_valid = True
-        elif location_type == 'RANGE_INTERPOLATED':
-            confidence = 'HIGH'
-            status = 'Verified - Street Level'
-            is_valid = True
-        elif location_type == 'GEOMETRIC_CENTER':
-            confidence = 'MEDIUM'
-            status = 'Verified - Area Level'
-            is_valid = True
-        else:
-            confidence = 'LOW'
-            status = 'Approximate Only'
-            is_valid = False
-        
-        # Check if address was corrected
-        orig_clean = re.sub(r'[^a-zA-Z0-9]', '', original.lower())
-        formatted_clean = re.sub(r'[^a-zA-Z0-9]', '', formatted.lower())
-        was_corrected = SequenceMatcher(None, orig_clean, formatted_clean).ratio() < 0.9
-        
-        return {
-            'original': original,
-            'formatted': formatted,
-            'is_valid': is_valid,
-            'status': status,
-            'confidence': confidence,
-            'was_corrected': was_corrected,
-            'components': parsed,
-            'latitude': location['lat'],
-            'longitude': location['lng'],
-            'location_type': location_type
-        }
-    
-    def _invalid_result(self, address: str) -> Dict:
-        """Create result for invalid address"""
-        return {
-            'original': address,
-            'formatted': '',
-            'is_valid': False,
-            'status': 'Not Found',
-            'confidence': 'NONE',
-            'was_corrected': False,
-            'components': {},
-            'latitude': None,
-            'longitude': None,
-            'location_type': 'NOT_FOUND'
-        }
-    
-    def _error_result(self, error: str) -> Dict:
-        """Create result for error"""
-        return {
-            'original': '',
-            'formatted': '',
-            'is_valid': False,
-            'status': f'Error: {error}',
-            'confidence': 'ERROR',
-            'was_corrected': False,
-            'components': {},
-            'latitude': None,
-            'longitude': None,
-            'location_type': 'ERROR'
-        }
-    
-    def _validate_with_nominatim(self, address: str, city: str, state: str, zip_code: str) -> Dict:
-        """Validate address using Nominatim (OpenStreetMap) as fallback"""
-        full_address = f"{address}, {city}, {state} {zip_code}, USA"
-        
-        try:
-            # Call Nominatim API
-            url = "https://nominatim.openstreetmap.org/search"
-            params = {
-                'q': full_address,
-                'format': 'json',
-                'addressdetails': 1,
-                'limit': 1,
-                'countrycodes': 'us'
-            }
-            headers = {'User-Agent': 'HospitalDataValidator/1.0'}
-            
-            response = requests.get(url, params=params, headers=headers, timeout=10)
-            time.sleep(NOMINATIM_RATE_LIMIT)  # Rate limiting for Nominatim
-            
-            if response.status_code == 200 and response.json():
-                result = response.json()[0]
-                return self._parse_nominatim_result(result, full_address)
-            else:
-                self.stats['invalid'] += 1
-                return self._invalid_result(full_address)
-                
-        except Exception as e:
-            self.stats['errors'] += 1
-            return self._error_result(str(e))
-    
-    def _parse_nominatim_result(self, result: Dict, original: str) -> Dict:
-        """Parse Nominatim result"""
-        display_name = result.get('display_name', '')
-        lat = result.get('lat', '')
-        lon = result.get('lon', '')
-        address = result.get('address', {})
-        
-        # Determine confidence based on result type
-        place_rank = int(result.get('place_rank', 30))
-        if place_rank <= 20:
-            confidence = 'HIGH'
-            status = 'Verified - Exact Match'
-            is_valid = True
-        elif place_rank <= 25:
-            confidence = 'MEDIUM'
-            status = 'Verified - Area Level'
-            is_valid = True
-        else:
-            confidence = 'LOW'
-            status = 'Approximate Only'
-            is_valid = False
-        
-        # Build formatted address
-        house_number = address.get('house_number', '')
-        road = address.get('road', '')
-        city_name = address.get('city', '') or address.get('town', '') or address.get('village', '')
-        state_name = address.get('state', '')
-        postcode = address.get('postcode', '')
-        
-        formatted_parts = []
-        if house_number and road:
-            formatted_parts.append(f"{house_number} {road}")
-        elif road:
-            formatted_parts.append(road)
-        if city_name:
-            formatted_parts.append(city_name)
-        if state_name and postcode:
-            formatted_parts.append(f"{state_name} {postcode}")
-            
-        formatted = ', '.join(formatted_parts) if formatted_parts else display_name
-        
-        # Check if corrected
-        orig_clean = re.sub(r'[^a-zA-Z0-9]', '', original.lower())
-        formatted_clean = re.sub(r'[^a-zA-Z0-9]', '', formatted.lower())
-        was_corrected = SequenceMatcher(None, orig_clean, formatted_clean).ratio() < 0.9
-        
-        if is_valid:
-            self.stats['verified'] += 1
-            if was_corrected:
-                self.stats['corrected'] += 1
-        else:
-            self.stats['invalid'] += 1
-        
-        return {
-            'original': original,
-            'formatted': formatted,
-            'is_valid': is_valid,
-            'status': status,
-            'confidence': confidence,
-            'was_corrected': was_corrected,
-            'components': {
-                'street_number': house_number,
-                'street': road,
-                'city': city_name,
-                'state': state_name,
-                'zip': postcode
-            },
-            'latitude': float(lat) if lat else None,
-            'longitude': float(lon) if lon else None,
-            'location_type': 'NOMINATIM'
-        }
-    
-    def get_statistics(self) -> Dict:
-        """Get validation statistics"""
-        return self.stats.copy()
+    # Removed internal validator in favor of standalone google_address_validator.GoogleMapsValidator
 
 
 class HospitalDataProcessor:
@@ -452,7 +288,7 @@ class HospitalDataProcessor:
     
     def __init__(self):
         self.cleaner = DataCleaner()
-        self.validator = GoogleMapsValidator(GOOGLE_MAPS_API_KEY)
+        self.validator = GoogleMapsValidator(api_key=None, requests_per_second=GOOGLE_MAPS_RPS)
         self.original_df = None
         self.cleaned_df = None
         self.comparison_data = []
@@ -472,10 +308,13 @@ class HospitalDataProcessor:
         
         self.original_df = active_df.copy()
         self.cleaned_df = active_df.copy()
+        # Track original index for comparison after deduplication
+        self.cleaned_df['Original_Index'] = self.cleaned_df.index
         
         # Process data
         self._clean_data()
         self._validate_addresses()
+        self._deduplicate()
         self._create_comparison()
         
         return self.cleaned_df
@@ -491,18 +330,31 @@ class HospitalDataProcessor:
             )
             
             # Clean address
-            self.cleaned_df.loc[idx, 'Address_Clean'] = self.cleaner.clean_address(
-                row.get('AddressOne', '')
-            )
+            address_one_raw = row.get('AddressOne', '')
+            address_two_raw = row.get('AddressTwo', row.get('Address2', ''))
+            address_std = self.cleaner.standardize_street_and_directions(address_one_raw)
+            self.cleaned_df.loc[idx, 'Address_Std'] = address_std
+            self.cleaned_df.loc[idx, 'Address_Clean'] = self.cleaner.clean_address(address_one_raw)
+            # Address 2
+            self.cleaned_df.loc[idx, 'Address2_Clean'] = self.cleaner.to_camel_case(address_two_raw)
             
             # Clean city
-            city = str(row.get('City', '')).strip()
-            self.cleaned_df.loc[idx, 'City_Clean'] = city if city.lower() not in ['unknown', 'n/a'] else ''
+            city_raw = str(row.get('City', '')).strip()
+            city_std = '' if city_raw.lower() in ['unknown', 'n/a'] else self.cleaner.to_title_phrase(city_raw)
+            self.cleaned_df.loc[idx, 'City_Std'] = city_std
+            self.cleaned_df.loc[idx, 'City_Clean'] = '' if not city_std else self.cleaner.to_camel_case(city_std)
             
             # Validate state
             state, state_valid = self.cleaner.validate_state(row.get('State', ''))
             self.cleaned_df.loc[idx, 'State_Clean'] = state
             self.cleaned_df.loc[idx, 'State_Valid'] = 'Y' if state_valid else 'N'
+            if state and not state_valid:
+                try:
+                    with open(INVALID_STATE_LOG, 'a') as logf:
+                        hosp = str(row.get('HospitalName', ''))
+                        logf.write(f"Invalid state '{state}' for hospital '{hosp}' (row {idx})\n")
+                except Exception:
+                    pass
             
             # Validate ZIP
             zip_code, zip_valid = self.cleaner.validate_zip(row.get('ZIPCode', ''))
@@ -520,6 +372,20 @@ class HospitalDataProcessor:
             )
         
         print("   ✓ Data cleaning complete")
+
+    def _deduplicate(self):
+        """Drop exact duplicate rows based on cleaned core columns."""
+        print("\n🧬 Deduplicating records...")
+        core_cols = [
+            'Hospital_Name_Clean', 'Address_Clean', 'Address2_Clean', 'City_Clean',
+            'State_Clean', 'ZIP_Clean', 'Phone_Clean'
+        ]
+        before = len(self.cleaned_df)
+        # Fill NaN with empty strings for dedup comparison consistency
+        self.cleaned_df[core_cols] = self.cleaned_df[core_cols].fillna('')
+        self.cleaned_df = self.cleaned_df.drop_duplicates(subset=core_cols, keep='first').reset_index(drop=True)
+        after = len(self.cleaned_df)
+        print(f"   ✓ Removed {before - after} duplicates; {after} records remain")
     
     def _validate_addresses(self):
         """Validate addresses using Google Maps"""
@@ -541,8 +407,9 @@ class HospitalDataProcessor:
                 print(f"   Processing {idx + 1}/{total}...")
             
             # Get address components
-            address = row.get('Address_Clean', '')
-            city = row.get('City_Clean', '')
+            # Use standardized, human-readable address/city for validation
+            address = row.get('Address_Std', '') or row.get('Address_Clean', '')
+            city = row.get('City_Std', '') or row.get('City_Clean', '')
             state = row.get('State_Clean', '')
             zip_code = row.get('ZIP_Clean', '')
             
@@ -576,8 +443,10 @@ class HospitalDataProcessor:
         print("\n📊 Creating comparison data...")
         
         for idx in self.cleaned_df.index:
-            orig = self.original_df.loc[idx]
             clean = self.cleaned_df.loc[idx]
+            idx_orig = clean.get('Original_Index', idx)
+            # Fallback-safe access to original row
+            orig = self.original_df.loc[idx_orig] if idx_orig in self.original_df.index else {}
             
             self.comparison_data.append({
                 'Hospital_Original': orig.get('HospitalName', ''),
@@ -609,7 +478,7 @@ class HospitalDataProcessor:
         # Save main output
         output_cols = [
             'ClinicKey', 'HospitalKey',
-            'Hospital_Name_Clean', 'Address_Clean', 'City_Clean',
+            'Hospital_Name_Clean', 'Address_Clean', 'Address2_Clean', 'City_Clean',
             'State_Clean', 'ZIP_Clean', 'Phone_Clean', 'Fax_Clean',
             'State_Valid', 'ZIP_Valid',
             'Validation_Status', 'Verified_Address', 'Address_Confidence',
@@ -684,12 +553,6 @@ def main():
     if not os.path.exists(INPUT_FILE):
         print(f"\n❌ Error: Input file '{INPUT_FILE}' not found!")
         return 1
-    
-    # Check Google Maps availability
-    if not GOOGLEMAPS_AVAILABLE:
-        print("\n⚠ Warning: googlemaps library not installed")
-        print("  Install with: pip install googlemaps")
-        print("  Continuing without address validation...")
     
     # Process data
     processor = HospitalDataProcessor()
